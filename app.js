@@ -1,8 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const active = new Set(['ASSIGNED','WORKING','VALIDATING','AI_REVIEW','PUBLISHING']);
+const active = new Set(['ANALYSIS_ASSIGNED','ASSIGNED','WORKING','VALIDATING','AI_REVIEW','PUBLISHING']);
 const attention = new Set(['INTERRUPTED','BLOCKED','MERGED_POLICY_DISCREPANCY']);
-const labels = {ASSIGNED:'할당됨',WORKING:'구현 중',VALIDATING:'검증 중',VALIDATION_WAIT:'공용 CI 대기',AI_REVIEW:'AI 리뷰',PUBLISHING:'게시 중',READY:'준비',DEPENDENCY_WAIT:'선행 작업 대기',TRACKING:'총괄 추적',REVIEW_WAIT:'리뷰 대기',DONE:'완료',CANCELLED:'취소',INTERRUPTED:'중단',BLOCKED:'차단',MERGED_POLICY_DISCREPANCY:'정책 확인',WAITING:'대기',RUNNING:'실행 중',COMPLETE:'완료',success:'통과',failure:'실패',error:'오류'};
+const labels = {ANALYSIS_ASSIGNED:'코드 분석 중',SCOPE_WAIT:'수정 범위 대기',ASSIGNED:'할당됨',WORKING:'구현 중',VALIDATING:'검증 중',VALIDATION_WAIT:'공용 CI 대기',AI_REVIEW:'AI 리뷰',PUBLISHING:'게시 중',READY:'준비',DEPENDENCY_WAIT:'선행 작업 대기',TRACKING:'총괄 추적',REVIEW_WAIT:'리뷰 대기',DONE:'완료',CANCELLED:'취소',INTERRUPTED:'중단',BLOCKED:'차단',MERGED_POLICY_DISCREPANCY:'정책 확인',WAITING:'대기',RUNNING:'실행 중',COMPLETE:'완료',success:'통과',failure:'실패',error:'오류'};
 let data = null, endpoint = '', paused = false, filter = 'all', busy = false, generation = 0, failed = false;
 const localDashboard = document.querySelector('meta[name="workflow-dashboard-local"]')?.content === 'same-origin';
 if (localDashboard) endpoint = new URL('/v1/status', location.href).href;
@@ -13,13 +13,13 @@ function num(value, digits=1) { return typeof value === 'number' && Number.isFin
 function age(value) { if (!Number.isFinite(value) || value <= 0) return '시각 미확인'; const seconds = Math.max(0, Date.now()/1000-value); return seconds<60 ? '방금 전' : seconds<3600 ? `${Math.floor(seconds/60)}분 전` : seconds<86400 ? `${Math.floor(seconds/3600)}시간 전` : `${Math.floor(seconds/86400)}일 전`; }
 function pill(text, warn=false) { return el('span',text,`pill${warn?' warn':''}`); }
 function github(repo, kind, number, text) { const a=el('a',text); if (/^[\w.-]+\/[\w.-]+$/.test(repo) && Number.isSafeInteger(number) && number>0) { a.href=`https://github.com/${repo}/${kind}/${number}`; a.target='_blank'; a.rel='noopener noreferrer'; a.setAttribute('aria-label',`${repo} ${kind==='issues'?'이슈':'PR'} #${number} GitHub에서 열기`); } return a; }
-function matches(job) { return filter==='all' || filter==='active' && active.has(job.state) || filter==='ready' && job.state==='READY' || filter==='review' && job.state==='REVIEW_WAIT' || filter==='attention' && attention.has(job.state); }
+function matches(job) { return filter==='all' || filter==='active' && active.has(job.state) || filter==='ready' && ['READY','SCOPE_WAIT'].includes(job.state) || filter==='review' && job.state==='REVIEW_WAIT' || filter==='attention' && attention.has(job.state); }
 function setConnection(message, tone) { $('connection-state').textContent=message; $('connection-dot').className=`dot ${tone||''}`; }
 function updateAge() { if(data) $('last-update').textContent=`${failed?'마지막 성공':'조회'} ${age(data.generated_at)}${paused?' · 자동 갱신 정지':''}${failed?' · 현재 상태 미확인':''}`; }
 function render() {
   const available = data.repositories.every(r=>r.availability==='available');
   const jobs=data.repositories.flatMap(r=>r.jobs.map(j=>({...j,repository:r.repository})));
-  for (const [key,test] of [['active',j=>active.has(j.state)],['ready',j=>j.state==='READY'],['review',j=>j.state==='REVIEW_WAIT'],['attention',j=>attention.has(j.state)]]) $('count-'+key).textContent=data.repositories.some(r=>r.availability==='available')?`${jobs.filter(test).length}${available?'':'+'}`:'—';
+  for (const [key,test] of [['active',j=>active.has(j.state)],['ready',j=>['READY','SCOPE_WAIT'].includes(j.state)],['review',j=>j.state==='REVIEW_WAIT'],['attention',j=>attention.has(j.state)]]) $('count-'+key).textContent=data.repositories.some(r=>r.availability==='available')?`${jobs.filter(test).length}${available?'':'+'}`:'—';
   const codeCount=jobs.filter(j=>active.has(j.state)).length, ciCount=data.repositories.flatMap(r=>r.ci).filter(c=>c.state==='RUNNING').length;
   $('count-active').textContent=available?String(codeCount+ciCount):'—';
   $('active-breakdown').textContent=available?`코드 ${codeCount} · CI ${ciCount}`:'코드 · CI 미확인 (일부 저장소 조회 불가)';
@@ -45,7 +45,8 @@ function renderQueue(jobs=null) {
   const repo=$('repository').value, query=$('search').value.trim().toLocaleLowerCase();
   const visible=jobs.filter(j=>(!repo||j.repository===repo)&&matches(j)&&(`${j.issue} ${j.target_number||''} ${j.title}`.toLocaleLowerCase().includes(query)));
   $('queue-total').textContent=`${visible.length} / ${jobs.length}`;$('jobs').replaceChildren();
-  $('repository-status').textContent=data.repositories.filter(r=>r.availability!=='available').map(r=>`${r.repository||'저장소 설정'}: 조회 불가 · 작업 수와 예약 합계는 불완전합니다.`).join(' / ');
+  const waitLabels={github_forbidden:'GitHub 접근 거부 · 저장소 접근 권한을 확인하세요',github_rate_limited:'GitHub 호출 제한 · 재시도 시각까지 대기하세요',github_unavailable:'GitHub 승인 조회 불가 · 연결 상태를 확인하세요'};
+  $('repository-status').textContent=data.repositories.flatMap(r=>r.availability!=='available'?[`${r.repository||'저장소 설정'}: 조회 불가 · 작업 수와 예약 합계는 불완전합니다.`]:r.claim_wait&&waitLabels[r.claim_wait.reason]?[`${r.repository}: 신규 할당 대기 · ${waitLabels[r.claim_wait.reason]} · 기존 작업은 계속됩니다.`]:[]).join(' / ');
   for(const j of visible) {
     const tr=el('tr'),title=el('td'),isPR=j.target_kind==='pr',target=j.target_number||j.issue;
     title.append(el('span',j.repository,'repo-name'),el('span',`${isPR?'PR':'이슈'} #${target} ${j.title}`,'issue-title'));
