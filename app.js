@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const active = new Set(['ASSIGNED','WORKING','VALIDATING','AI_REVIEW','PUBLISHING']);
 const attention = new Set(['INTERRUPTED','BLOCKED','MERGED_POLICY_DISCREPANCY']);
-const labels = {ASSIGNED:'할당됨',WORKING:'구현 중',VALIDATING:'검증 중',AI_REVIEW:'AI 리뷰',PUBLISHING:'게시 중',READY:'준비',REVIEW_WAIT:'리뷰 대기',DONE:'완료',CANCELLED:'취소',INTERRUPTED:'중단',BLOCKED:'차단',MERGED_POLICY_DISCREPANCY:'정책 확인',WAITING:'대기',RUNNING:'실행 중',COMPLETE:'완료',success:'통과',failure:'실패',error:'오류'};
+const labels = {ASSIGNED:'할당됨',WORKING:'구현 중',VALIDATING:'검증 중',VALIDATION_WAIT:'공용 CI 대기',AI_REVIEW:'AI 리뷰',PUBLISHING:'게시 중',READY:'준비',DEPENDENCY_WAIT:'선행 작업 대기',TRACKING:'총괄 추적',REVIEW_WAIT:'리뷰 대기',DONE:'완료',CANCELLED:'취소',INTERRUPTED:'중단',BLOCKED:'차단',MERGED_POLICY_DISCREPANCY:'정책 확인',WAITING:'대기',RUNNING:'실행 중',COMPLETE:'완료',success:'통과',failure:'실패',error:'오류'};
 let data = null, endpoint = '', paused = false, filter = 'all', busy = false, generation = 0, failed = false;
 const localDashboard = document.querySelector('meta[name="workflow-dashboard-local"]')?.content === 'same-origin';
 if (localDashboard) endpoint = new URL('/v1/status', location.href).href;
@@ -43,13 +43,30 @@ function renderQueue(jobs=null) {
   if(!data)return;
   jobs ||= data.repositories.flatMap(r=>r.jobs.map(j=>({...j,repository:r.repository})));
   const repo=$('repository').value, query=$('search').value.trim().toLocaleLowerCase();
-  const visible=jobs.filter(j=>(!repo||j.repository===repo)&&matches(j)&&(`${j.issue} ${j.title}`.toLocaleLowerCase().includes(query)));
+  const visible=jobs.filter(j=>(!repo||j.repository===repo)&&matches(j)&&(`${j.issue} ${j.target_number||''} ${j.title}`.toLocaleLowerCase().includes(query)));
   $('queue-total').textContent=`${visible.length} / ${jobs.length}`;$('jobs').replaceChildren();
   $('repository-status').textContent=data.repositories.filter(r=>r.availability!=='available').map(r=>`${r.repository||'저장소 설정'}: 조회 불가 · 작업 수와 예약 합계는 불완전합니다.`).join(' / ');
-  for(const j of visible) {const tr=el('tr'),title=el('td');title.append(el('span',j.repository,'repo-name'),el('span',`#${j.issue} ${j.title}`,'issue-title'));const state=el('td');state.append(pill(labels[j.state]||'미확인',attention.has(j.state)));const link=el('td');link.append(github(j.repository,'issues',j.issue,'↗'));tr.append(title,state,el('td',j.worker||'미할당'),el('td',age(j.updated)),link);$('jobs').append(tr);}
+  for(const j of visible) {
+    const tr=el('tr'),title=el('td'),isPR=j.target_kind==='pr',target=j.target_number||j.issue;
+    title.append(el('span',j.repository,'repo-name'),el('span',`${isPR?'PR':'이슈'} #${target} ${j.title}`,'issue-title'));
+    if(isPR&&target!==j.issue)title.append(el('small',`연결 이슈 #${j.issue}`,'job-note'));
+    if(j.reason_label)title.append(el('p',j.reason_label,'job-reason'));
+    if(j.next_action)title.append(el('p',j.next_action,'job-action'));
+    if(j.dependencies_waiting?.length)title.append(el('small',`선행 작업: ${j.dependencies_waiting.map(n=>'#'+n).join(', ')}`,'job-note'));
+    if(j.required_environments?.length)title.append(el('small',`필수 실제 환경: ${j.required_environments.join(', ')}`,'job-note'));
+    const state=el('td');state.append(pill(labels[j.state]||'미확인',attention.has(j.state)));
+    if(Number.isSafeInteger(j.assignments))state.append(el('small',`할당 ${j.assignments}회`,'job-note'));
+    if(Number.isSafeInteger(j.pr_cycles))state.append(el('small',`PR 작업 ${j.pr_cycles}회`,'job-note'));
+    if(j.failures) {const counts=[['validation','검증'],['review','리뷰'],['protocol','실행']].filter(([k])=>Number.isSafeInteger(j.failures[k]));if(counts.length)state.append(el('small',`누적 실패: ${counts.map(([k,label])=>`${label} ${j.failures[k]}`).join(' · ')}`,'job-note'));}
+    const hosts=el('td');hosts.append(el('span',`코드 ${j.code_worker||j.worker||'미할당'}`));
+    if(j.ci_state)hosts.append(el('small',`CI ${j.ci_worker||'미할당'} · ${labels[j.ci_state]||'미확인'}`,'job-note'));
+    if(j.last_ci_result)hosts.append(el('small',`최근 CI ${labels[j.last_ci_result]||'미확인'}`,'job-note'));
+    const link=el('td');link.append(github(j.repository,isPR?'pull':'issues',target,'↗'));
+    tr.append(title,state,hosts,el('td',age(j.updated)),link);$('jobs').append(tr);
+  }
   if(!visible.length){const tr=el('tr'),td=el('td',jobs.length?'조건에 맞는 작업이 없습니다.':data.availability==='available'?'저장된 작업이 없습니다.':'조회 가능한 작업이 없습니다. 저장소 연결 상태를 확인하세요.','empty');td.colSpan=5;tr.append(td);$('jobs').append(tr);}
 }
-function renderCI() { $('ci').replaceChildren();const priority=c=>c.state==='RUNNING'?0:c.state==='WAITING'?1:2;const rows=data.repositories.flatMap(r=>r.ci.map(c=>({...c,repository:r.repository}))).sort((a,b)=>priority(a)-priority(b)||(b.updated||0)-(a.updated||0));for(const c of rows){const r={repository:c.repository};const row=el('div',undefined,'ci-row'),title=el('div');title.append(github(r.repository,'pull',c.pr,`${r.repository} / PR #${c.pr||'—'}`),el('small',`${c.context||'검증 컨텍스트 미확인'} · 기기 ${c.worker||'미할당'}`));row.append(title,pill(labels[c.result]||labels[c.state]||'미확인',['failure','error'].includes(c.result)||c.state==='INTERRUPTED'),el('code',c.head?c.head.slice(0,12):'SHA 미확인'),el('time',age(c.updated)));$('ci').append(row);}if(!$('ci').children.length)$('ci').append(el('div',data.availability==='available'?'저장된 CI 기록이 없습니다.':'CI 기록을 확인할 수 없습니다. 저장소 연결 상태를 확인하세요.','empty'));}
+function renderCI() { $('ci').replaceChildren();const priority=c=>c.state==='RUNNING'?0:c.state==='WAITING'?1:2;const rows=data.repositories.flatMap(r=>r.ci.map(c=>({...c,repository:r.repository}))).sort((a,b)=>priority(a)-priority(b)||(b.updated||0)-(a.updated||0));for(const c of rows){const r={repository:c.repository};const row=el('div',undefined,'ci-row'),title=el('div');title.append(github(r.repository,c.issue?'issues':'pull',c.issue||c.pr,`${r.repository} / ${c.issue?'이슈':'PR'} #${c.issue||c.pr||'—'}`),el('small',`${c.context||'검증 컨텍스트 미확인'} · 기기 ${c.worker||'미할당'}`));row.append(title,pill(labels[c.result]||labels[c.state]||'미확인',['failure','error'].includes(c.result)||c.state==='INTERRUPTED'),el('code',c.head?c.head.slice(0,12):'SHA 미확인'),el('time',age(c.updated)));$('ci').append(row);}if(!$('ci').children.length)$('ci').append(el('div',data.availability==='available'?'저장된 CI 기록이 없습니다.':'CI 기록을 확인할 수 없습니다. 저장소 연결 상태를 확인하세요.','empty'));}
 function showHost(h){const root=$('host-detail');root.replaceChildren(el('p','HOST DETAIL','eyebrow'),el('h2',h.name));const dl=el('dl');for(const [k,v] of [['워커 ID',h.id],['실행 중 코드',h.active_jobs ?? '미확인'],['실행 중 CI',h.active_ci ?? '미확인'],['설정된 역할',h.roles.join(' · ')||'미설정'],['저장소',h.repositories.join(', ')||'없음'],['하트비트',`${h.heartbeat_status} · ${age(h.heartbeat_at)}`],['자원 측정',`${h.metrics_status} · ${age(h.metrics_at)}`],['예약 메모리',`${num(h.reservations.memory_gb)} GiB`],['예약 디스크',`${num(h.reservations.disk_gb)} GiB`],['예약 CPU',`${num(h.reservations.cpu_cores)} cores`],['예약 집계',h.reservations.complete?'모든 설정 저장소 확인됨':'일부 비용 또는 저장소 미확인']])dl.append(el('dt',k),el('dd',v));root.append(dl,el('p','중단된 소유자의 예약도 포함합니다. 기기의 데몬 실행 여부와 활성 작업 수는 별개입니다.'));$('host-dialog').showModal();}
 async function refresh(){if(!endpoint||busy)return;busy=true;const version=generation;$('refresh').disabled=true;const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),12000);try{const response=await fetch(endpoint,{credentials:'omit',cache:'no-store',signal:controller.signal,redirect:'error'});if(!response.ok)throw new Error('response');const next=await response.json();if(next.schema_version!==1||!Array.isArray(next.repositories)||!Array.isArray(next.hosts))throw new Error('schema');if(version!==generation)return;data=next;failed=false;setConnection(next.availability==='available'?'비공개 조회 연결됨':'연결됨 · 일부 저장소 확인 필요',next.availability==='available'?'live':'warning');render();}catch{if(version!==generation)return;failed=true;setConnection('연결 실패 · Tailscale, 계정 권한과 브라우저 로컬 네트워크 권한을 확인하세요','warning');if(data)render();else $('last-update').textContent='운영 상태 미확인';}finally{clearTimeout(timeout);busy=false;$('refresh').disabled=!endpoint;}}
 $('settings').addEventListener('click',()=>{$('endpoint').value=endpoint;$('form-error').textContent='';$('connection-dialog').showModal();});
